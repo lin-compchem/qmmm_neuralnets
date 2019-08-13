@@ -1,0 +1,28 @@
+\documentclass[12pt]{article}
+\usepackage{manstyle}
+\begin{document}
+\title{QMMM Neural Networks Manual}
+\author{Adam Duster}
+\date{\today}
+\maketitle
+
+\begin{abstract}
+This python package contains code for creating and training NN models to predict energies and gradients.
+Models are created using the TensorFlow and Keras frameworks.
+Models can be saved in a servable format for use with TensorFlow Serving and interface with the Fort-BPSF program.
+\end{abstract}
+
+\section{Water Models}
+This section covers the code and files used to create NN for the example.
+
+\section{Correction Term}
+The correction term in the water model is calculated as:
+\begin{equation}
+	E_\mathrm{Corr} = E_{\mr{MP2}} - \mu_{E_{\mr{MP2}}} - (E_{\mr{SE}} - \mu_{E_{\mr{SE}}})
+\end{equation}
+Where $E_{\mr{MP2}}$ is the MP2 electronic energy, $E_{\mr{SE}}$ is the semiempirical heat of formation, and $\mu_{E}$ is the average energy of the data used to calculate the correction term.
+
+
+
+\end{document}
+
