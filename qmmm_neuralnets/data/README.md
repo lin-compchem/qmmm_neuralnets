@@ -18,4 +18,6 @@ correct files.
 
 ## Manifest
 
-* `look_and_say.dat`: first entries of the "Look and Say" integer series, sequence [A005150](https://oeis.org/A005150)
+* 1kh9o4.h5
+* h9o4.h5
+* h9o4_corrections.h5

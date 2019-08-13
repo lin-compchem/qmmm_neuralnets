@@ -3,6 +3,7 @@ This file contains the tensorflow implementation of the BPSF functions for a
 BPSF NN
 """
 import tensorflow as tf
+import pickle
 
 from qmmm_neuralnets.layers.nn_functions import he_normal_dense_layer, nn_out_layer
 
@@ -49,6 +50,9 @@ def define_config(xh, xo):
     config.grad_loss_scale = 1/10.
     config.grad_atoms = 13
     config.export_path = 'saved_model'
+    config.restore_path = None
+    config.score_path = None
+    config.builder = None
     return config
 
 
@@ -170,11 +174,13 @@ def define_graph(config, train_grads=False):
         cost = tf.add(grad_cost, energy_cost)
         train_step = optimizer.minimize(cost)
     else:
-        train_step = optimizer.minimize(energy_cost)
+        cost = energy_cost
+        train_step = optimizer.minimize(cost)
 
 
     # Saving info
     saver = tf.train.Saver()
+
     return AttrDict(locals())
 
 
@@ -259,3 +265,61 @@ def define_optimizer(config):
         return tf.train.GradientDescentOptimizer(learning_rate=lr)
     else:
         raise TypeError
+
+
+def train_model(config, graph, train_dict, valid_dict=None):
+    """
+    Train the neural network for a designated amount of epochs
+
+    Parameters
+    ----------
+    config: AttrDict
+        Configuration options
+    graph: AttrDict
+        TF Graph to execute
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    Uses the feed-dict method of input.
+
+    """
+    start_epoch = config['start_epoch']
+    end_epoch = start_epoch + config['epochs']
+    train_scores = []
+    valid_scores = []
+    epoch_scores = []
+    save_name = None
+
+    # Main training loop
+    with tf.Session() as sess:
+        if config['restore_path']:
+            graph.saver.restore(sess, config['restore_path'])
+        else:
+            sess.run(tf.global_variables_initializer())
+        for epoch in range(start_epoch, end_epoch):
+            sess.run(graph.train_step, feed_dict=train_dict)
+            if epoch % config['score_freq'] == 0:
+                train_scores.append(graph.cost.eval(feed_dict=train_dict))
+                if valid_dict:
+                    valid_scores.append(graph.cost.eval(feed_dict=valid_dict))
+                epoch_scores.append(epoch)
+            if epoch % config['print_freq'] == 0:
+                if valid_dict:
+                    print(epoch_scores[-1], train_scores[-1], valid_scores[-1])
+                else:
+                    print(epoch_scores[-1], train_scores[-1])
+            if epoch % config['save_freq'] == 0:
+                save_name = config.save_name.format(epoch)
+                graph.saver.save(sess, config.save_name.format(epoch))
+                if config['score_path'] and valid_dict:
+                    pickle.dump(valid_scores, open(config['score_path'].format(epoch),
+                                             'wb'))
+        if config.builder:
+            builder = config.builder(graph, config, sess)
+            builder.save()
+        config['start_epoch'] = epoch
+        config['restore_name'] = save_name

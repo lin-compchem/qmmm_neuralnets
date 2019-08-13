@@ -10,7 +10,6 @@ import qmmm_neuralnets.input
 import qmmm_neuralnets.units
 import qmmm_neuralnets.info
 import qmmm_neuralnets.layers
-#import .models
 
 # Handle versioneer
 from ._version import get_versions
