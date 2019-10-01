@@ -47,7 +47,7 @@ def define_config(xh, xo):
     config.id_dtype = tf.int32
     config.optimizer = 'adam'
     config.energy_loss_scale = 1.0
-    config.grad_loss_scale = 1/10.
+    config.grad_loss_scale = 1/10./3.
     config.grad_atoms = 13
     config.export_path = 'saved_model'
     config.restore_path = None
@@ -57,7 +57,7 @@ def define_config(xh, xo):
 
 
 def element_nn(nodes, input_basis, input_segids, basis_dim, layer_name,
-        act=tf.nn.tanh):
+        act=tf.nn.tanh, dtype=tf.float32):
     """
 
     Parameters
@@ -80,17 +80,18 @@ def element_nn(nodes, input_basis, input_segids, basis_dim, layer_name,
     layer_str = layer_name + '-%d'
     with tf.name_scope(layer_name):
         layers.append(layer_type(input_basis, basis_dim, nodes[0],
-            layer_str % 0, act=act))
+            layer_str % 0, act=act, dtype=dtype))
         for l in range(1, num_layers):
             print(l)
             layers.append(layer_type(layers[l-1], nodes[l-1], nodes[l],
-                layer_str % l, act=act))
+                layer_str % l, act=act, dtype=dtype))
         l += 1
-        layers.append(nn_out_layer(layers[l-1], nodes[l-1], 1, layer_str %l))
+        layers.append(nn_out_layer(layers[l-1], nodes[l-1], 1, layer_str %l,
+                                   dtype=dtype))
         return tf.math.segment_sum(layers[l], input_segids)
         
 
-def define_graph(config, train_grads=False):
+def define_graph(config):
     """
     The entire graph is defined here based on the options set in the config
     subroutine.
@@ -122,64 +123,188 @@ def define_graph(config, train_grads=False):
             name='h_bas')
     xo = tf.placeholder(dtype=config.bf_dtype, shape=(None, config.olen),
             name='o_bas')
-    y = tf.placeholder(dtype=config.y_dtype, shape=(None), name='en')
+    y = tf.placeholder(dtype=config.bf_dtype, shape=(None), name='en')
     h_ids = tf.placeholder(dtype=config.id_dtype, shape=(None), name='h_ids')
     o_ids = tf.placeholder(dtype=config.id_dtype, shape=(None), name='o_ids')
+    grad_scale = tf.placeholder(dtype=config.bf_dtype, shape=(),
+                                name='grad_scale')
 
     # For gradient training, we must pass in the
-    if train_grads:
-        h_bas2atom = tf.placeholder(dtype=config.id_dtype, shape=(None,),
-                                    name='h_atom_basis_to_grad_index')
-        o_bas2atom = tf.placeholder(dtype=config.id_dtype, shape=(None,),
-                                    name='o_atom_basis_to_grad_index')
-        h_bas_grads = tf.placeholder(dtype=config.bf_dtype,
-                                     shape=(None, config.hlen, config.grad_atoms, 3),
-                                     name='h_basis_grads')
-        o_bas_grads = tf.placeholder(dtype=config.bf_dtype,
-                                     shape=(None, config.olen, config.grad_atoms, 3),
-                                     name='o_basis_grads')
-        h_refg = tf.placeholder(dtype=config.bf_dtype, shape=(None, 3),
-                                name='h_reference_cartesian_gradients')
-        o_refg = tf.placeholder(dtype=config.bf_dtype, shape=(None, 3),
-                                name='o_reference_cartesian_gradients')
+    h_bas_grads = tf.placeholder(dtype=config.bf_dtype,
+                                 shape=(None, config.hlen, config.grad_atoms, 3),
+                                 name='h_basis_grads')
+    o_bas_grads = tf.placeholder(dtype=config.bf_dtype,
+                                 shape=(None, config.olen, config.grad_atoms, 3),
+                                 name='o_basis_grads')
+    ref_grads = tf.placeholder(dtype=config.bf_dtype,
+                               shape=(None, config.grad_atoms, 3),
+                               name='h_reference_cartesian_gradients')
+
 
     # The BPNN
-    h_en = element_nn(config.h_nodes, xh, h_ids, config.hlen, 'h_nn')
-    o_en = element_nn(config.o_nodes, xo, o_ids, config.olen, 'o_nn')
+    h_en = element_nn(config.h_nodes, xh, h_ids, config.hlen, 'h_nn',
+                      dtype=config.bf_dtype)
+    o_en = element_nn(config.o_nodes, xo, o_ids, config.olen, 'o_nn',
+                      dtype=config.bf_dtype)
     nn_en = tf.add(h_en, o_en)
+    energy_cost = tf.reduce_mean(tf.math.squared_difference(nn_en,
+                                                     tf.reshape(y, (-1,1))),
+                          name='energy_cost')
+    squared_error = tf.math.squared_difference(nn_en, tf.reshape(y, (-1,1)))
+    difference = tf.subtract(nn_en, tf.reshape(y, (-1,1)))
 
     # The gradients of the neural network WRT the basis functions
     dnn_dh, dnn_do = tf.gradients(nn_en, [xh, xo])[0:2]
-    if train_grads:
-        h_atm_grads = tf.tensordot(dnn_dh, h_bas_grads, axes=([0, 1], [0, 1]))
-        o_atm_grads = tf.tensordot(dnn_do, o_bas_grads, axes=([0, 1], [0, 1]))
-        atm_grads = tf.add(h_atm_grads, o_atm_grads)
-        h_cart_grads = tf.gather(atm_grads, h_bas2atom)
-        o_cart_grads = tf.gather(atm_grads, o_bas2atom)
 
-    # Training and statistics
-    energy_cost = tf.reduce_mean(tf.math.squared_difference(nn_en, tf.reshape(y, (-1,1))))
-    squared_error = tf.math.squared_difference(nn_en, tf.reshape(y, (-1,1)))
-    difference = tf.subtract(nn_en, tf.reshape(y, (-1,1)))
+    # Tensor contraction to [basis_size, ngrum_atoms, 3]
+    h_bas_cart_grads = tf.einsum('ijkl,ij->ikl', h_bas_grads, dnn_dh)
+    # Here we go to [batch_size, num_atoms, 3]
+    h_cart_grads = tf.math.segment_sum(h_bas_cart_grads, h_ids)
+
+    o_bas_cart_grads = tf.einsum('ijkl,ij->ikl', o_bas_grads, dnn_do)
+    o_cart_grads = tf.math.segment_sum(o_bas_cart_grads, o_ids)
+
+    # This gives us the total correction gradient
+    corr_grad = tf.add(h_cart_grads, o_cart_grads)
+    grad_error = tf.math.squared_difference(corr_grad, ref_grads, name='grad_error')
+    #
+    # This is replaced by MSE above
+    #ge
+    # This gives us the error in gradient
+#    grad_error = tf.subtract(corr_grad, ref_grads, name='grad_error')
+    # We need the norm of the error in gradient along the axis of xyz
+#    grad_norm = tf.norm(grad_error, ord='euclidean', axis=2, name='grad_norm')
+
+
+
+
+    # Sum before reduce mean, because otherwise the 0 padded axes will
+    # affect the meanc
+    cart_sum = tf.reduce_sum(grad_error, axis=2, name='cart_grad_sum')
+    geom_sum = tf.reduce_sum(grad_error, axis=1, name='geom_grad_sum')
+    geom_mean = tf.reduce_mean(geom_sum, name='grad_geom_mean')
+    grad_cost = tf.multiply(geom_mean, grad_scale, name='grad_cost')
+    cost = tf.add(grad_cost, energy_cost, name='total_cost')
 
     # Optimizer
     optimizer = define_optimizer(config)
 
-    if train_grads:
-        h_grad_cost = tf.multiply(config.grad_loss_scale, (
-            tf.reduce_mean(tf.math.squared_difference(h_cart_grads, h_refg))))
-        o_grad_cost = tf.multiply(config.grad_loss_scale, (
-            tf.reduce_mean(tf.math.squared_difference(o_cart_grads, o_refg))))
-        grad_cost = tf.add(h_grad_cost, o_grad_cost)
-        cost = tf.add(grad_cost, energy_cost)
-        train_step = optimizer.minimize(cost)
-    else:
-        cost = energy_cost
-        train_step = optimizer.minimize(cost)
-
+    # Training and statistics
+    train_step = optimizer.minimize(energy_cost)
+    train_grads = optimizer.minimize(grad_cost)
+    train_all = optimizer.minimize(cost)
 
     # Saving info
-    saver = tf.train.Saver()
+    saver = tf.train.Saver(max_to_keep=100000)
+
+    return AttrDict(locals())
+
+
+def define_graph_quickgrad(config):
+    """
+    The entire graph is defined here based on the options set in the config
+    subroutine.
+
+    Parameters
+    ----------
+    config: AttrDict
+        This contains parameters to setup the network
+    train_grads: bool
+        Add graph elements for training the gradient? See Notes
+
+    Returns
+    -------
+    graph: AttrDict
+        A BPNN Tensorflow Graph
+
+    Notes
+    -----
+    The loss function can be accessed by graph.cost
+
+    A loss function for the gradient can be obtained by first passing in True
+    for the parameter train_grads.
+
+    """
+    tf.reset_default_graph()
+
+    # Input options
+    xh = tf.placeholder(dtype=config.bf_dtype, shape=(None, config.hlen),
+            name='h_bas')
+    xo = tf.placeholder(dtype=config.bf_dtype, shape=(None, config.olen),
+            name='o_bas')
+    y = tf.placeholder(dtype=config.bf_dtype, shape=(None), name='en')
+    h_ids = tf.placeholder(dtype=config.id_dtype, shape=(None), name='h_ids')
+    o_ids = tf.placeholder(dtype=config.id_dtype, shape=(None), name='o_ids')
+    grad_scale = tf.placeholder(dtype=config.bf_dtype, shape=(),
+                                name='grad_scale')
+
+    # For gradient training, we must pass in the
+    h_bas_grads = tf.placeholder(dtype=config.bf_dtype,
+                                 shape=(None, config.hlen, config.grad_atoms, 3),
+                                 name='h_basis_grads')
+    o_bas_grads = tf.placeholder(dtype=config.bf_dtype,
+                                 shape=(None, config.olen, config.grad_atoms, 3),
+                                 name='o_basis_grads')
+    ref_grads = tf.placeholder(dtype=config.bf_dtype,
+                               shape=(None, config.grad_atoms, 3),
+                               name='h_reference_cartesian_gradients')
+
+
+    # The BPNN
+    h_en = element_nn(config.h_nodes, xh, h_ids, config.hlen, 'h_nn',
+                      dtype=config.bf_dtype)
+    o_en = element_nn(config.o_nodes, xo, o_ids, config.olen, 'o_nn',
+                      dtype=config.bf_dtype)
+    nn_en = tf.add(h_en, o_en)
+    energy_cost = tf.reduce_mean(tf.math.squared_difference(nn_en,
+                                                     tf.reshape(y, (-1,1))),
+                          name='energy_cost')
+    squared_error = tf.math.squared_difference(nn_en, tf.reshape(y, (-1,1)))
+    difference = tf.subtract(nn_en, tf.reshape(y, (-1,1)))
+
+    # The gradients of the neural network WRT the basis functions
+    dnn_dh, dnn_do = tf.gradients(nn_en, [xh, xo])[0:2]
+
+    # Tensor contraction to [basis_size, ngrum_atoms, 3]
+    h_bas_cart_grads = tf.einsum('ijkl,ij->ikl', h_bas_grads, dnn_dh)
+    # Here we go to [batch_size, num_atoms, 3]
+    h_cart_grads = tf.math.segment_sum(h_bas_cart_grads, h_ids)
+
+    o_bas_cart_grads = tf.einsum('ijkl,ij->ikl', o_bas_grads, dnn_do)
+    o_cart_grads = tf.math.segment_sum(o_bas_cart_grads, o_ids)
+
+    # This gives us the total correction gradient
+    corr_grad = tf.add(h_cart_grads, o_cart_grads)
+    grad_error = tf.math.squared_difference(corr_grad, ref_grads, name='grad_error')
+    #
+    # This is replaced by MSE above
+    #ge
+    # This gives us the error in gradient
+#    grad_error = tf.subtract(corr_grad, ref_grads, name='grad_error')
+    # We need the norm of the error in gradient along the axis of xyz
+#    grad_norm = tf.norm(grad_error, ord='euclidean', axis=2, name='grad_norm')
+
+
+
+
+    # Sum before reduce mean, because otherwise the 0 padded axes will
+    # affect the meanc
+    cart_sum = tf.reduce_sum(grad_error, axis=2, name='cart_grad_sum')
+    geom_sum = tf.reduce_sum(grad_error, axis=1, name='geom_grad_sum')
+    geom_mean = tf.reduce_mean(geom_sum, name='grad_geom_mean')
+    grad_cost = tf.multiply(geom_mean, grad_scale, name='grad_cost')
+    cost = tf.add(grad_cost, energy_cost, name='total_cost')
+
+    # Optimizer
+    optimizer = define_optimizer(config)
+
+    # Training and statistics
+    train_step = optimizer.minimize(energy_cost)
+    train_grads = optimizer.minimize(grad_cost)
+    train_all = optimizer.minimize(cost)
+
+    # Saving info
+    saver = tf.train.Saver(max_to_keep=100000)
 
     return AttrDict(locals())
 
@@ -300,12 +425,14 @@ def train_model(config, graph, train_dict, valid_dict=None):
             graph.saver.restore(sess, config['restore_path'])
         else:
             sess.run(tf.global_variables_initializer())
-        for epoch in range(start_epoch, end_epoch):
-            sess.run(graph.train_step, feed_dict=train_dict)
+        print("Initial train cost:", config['cost'].eval(feed_dict=train_dict))
+        for epoch in range(start_epoch, end_epoch + 1):
+            sess.run(config['train'], feed_dict=train_dict)
+
             if epoch % config['score_freq'] == 0:
-                train_scores.append(graph.cost.eval(feed_dict=train_dict))
+                train_scores.append(config['cost'].eval(feed_dict=train_dict))
                 if valid_dict:
-                    valid_scores.append(graph.cost.eval(feed_dict=valid_dict))
+                    valid_scores.append(config['cost'].eval(feed_dict=valid_dict))
                 epoch_scores.append(epoch)
             if epoch % config['print_freq'] == 0:
                 if valid_dict:
@@ -321,5 +448,5 @@ def train_model(config, graph, train_dict, valid_dict=None):
         if config.builder:
             builder = config.builder(graph, config, sess)
             builder.save()
-        config['start_epoch'] = epoch
-        config['restore_name'] = save_name
+        config['start_epoch'] = end_epoch
+        config['restore_path'] = save_name

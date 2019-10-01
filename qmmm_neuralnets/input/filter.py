@@ -5,7 +5,7 @@ import numpy as np
 
 
 
-def do_pca(bfs, ncomponents):
+def do_pca(bfs, n_components):
     """
     This is the code from my PCA experiment. Should do again and report
     results in the manual
@@ -37,7 +37,9 @@ def do_pca(bfs, ncomponents):
     return pca_models
 
 
-def arbitrary_from_full_bpsf(h_rad, o_rad, h_ang, o_ang):
+def arbitrary_from_full_bpsf(h_rad, o_rad, h_ang, o_ang,
+                             h_radg=None, o_radg=None, h_angg=None,
+                             o_angg=None):
     """
     This method arbitrarily selects features from input vectors. The method
     is described in the example notebook: TODO
@@ -56,10 +58,18 @@ def arbitrary_from_full_bpsf(h_rad, o_rad, h_ang, o_ang):
     hbf: ndarray
     obf: ndarray
     """
+    grads = False
     assert h_rad.shape[1] == 48
     assert o_rad.shape[1] == 48
     assert h_ang.shape[1] == 36
     assert o_ang.shape[1] == 54
+
+    if h_radg or o_radg or h_angg or o_angg:
+        assert h_radg != 0
+        assert o_radg != 0
+        assert h_angg != 0
+        assert o_angg != 0
+        grads = True
 
     h_rx = [0, 24, 2, 25]
     h_ax = [1, 3, 7, 9, 19, 21, 23, 25, 27, 29, 31, 33]
@@ -67,14 +77,30 @@ def arbitrary_from_full_bpsf(h_rad, o_rad, h_ang, o_ang):
     o_ax = [23, 27, 36, 37, 38, 39, 42, 43, 44, 45, 48, 49, 50]
     hbf = np.float32(np.concatenate((np.delete(h_rad, h_rx, axis=1), np.delete(h_ang, h_ax, axis=1)), axis=1))
     obf = np.float32(np.concatenate((np.delete(o_rad, o_rx, axis=1), np.delete(o_ang, o_ax, axis=1)), axis=1))
+    if grads:
+        hg = np.float32(np.concatenate(
+            (np.delete(h_radg, h_rx, axis=1), np.delete(h_radg, h_ax, axis=1)),
+            axis=1))
+        og = np.float32(np.concatenate(
+            (np.delete(o_radg, o_rx, axis=1), np.delete(o_radg, o_ax, axis=1)),
+            axis=1))
     h_rx = np.concatenate((np.arange(11, 22, 1), np.arange(31, 44, 1), (45, 46, 49, 50, 59, 60, 61, 62, 63, 64,65, 66, 67)))
     hbf = np.delete(hbf, h_rx, axis=1)
+    if grads:
+        hg = np.delete(hg, h_rx, axis=1)
     h_rx = (22, 23, 26, 28, 27)
     hbf = np.delete(hbf, h_rx, axis=1)
+    if grads:
+        hg = np.delete(hg, h_rx, axis=1)
     o_rx = np.concatenate((np.arange(9,21), np.arange(28,42), np.arange(43, 60, 2),
                               np.asarray((62, 63, 67, 71, 73, 76, 77, 78, 79, 80, 81, 82))))
     obf = np.delete(obf, o_rx, axis=1)
+    if grads:
+        og = np.delete(og, o_rx, axis=1)
     o_rx = [17, 19, 20, 21, 22, 23, 24, 25,29,31]
     obf = np.delete(obf, o_rx, axis=1)
-
+    if grads:
+        og = np.delete(og, o_rx, axis=1)
+    if grads:
+        return hbf, obf, hg, og
     return hbf, obf
